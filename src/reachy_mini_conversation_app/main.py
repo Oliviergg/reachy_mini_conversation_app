@@ -32,6 +32,7 @@ def update_chatbot(chatbot: List[Dict[str, Any]], response: Dict[str, Any]) -> L
 
 def main() -> None:
     """Entrypoint for the Reachy Mini conversation app."""
+    print("MAIN!!!")
     args, _ = parse_args()
     run(args)
 
@@ -132,12 +133,33 @@ def run(
 
     head_wobbler = HeadWobbler(set_speech_offsets=movement_manager.set_speech_offsets)
 
+    wake_word_gate = None
+    if config.WAKE_WORD:
+        try:
+            from reachy_mini_conversation_app.wake_word import WakeWordGate
+
+            wake_word_gate = WakeWordGate(
+                wakeword_model=config.WAKE_WORD,
+                sleep_timeout_s=config.WAKE_WORD_SLEEP_TIMEOUT_S,
+                detection_threshold=config.WAKE_WORD_THRESHOLD,
+                vad_threshold=config.WAKE_WORD_VAD_THRESHOLD,
+                rms_floor=config.WAKE_WORD_RMS_FLOOR,
+                on_wake=lambda: movement_manager.set_sleep(False),
+                on_sleep=lambda: movement_manager.set_sleep(True),
+            )
+            # Robot starts asleep when the wake-word gate is enabled.
+            movement_manager.set_sleep(True)
+        except Exception as e:
+            logger.warning("Wake-word gate disabled (load failed): %s", e)
+            wake_word_gate = None
+
     deps = ToolDependencies(
         reachy_mini=robot,
         movement_manager=movement_manager,
         camera_worker=camera_worker,
         vision_processor=vision_processor,
         head_wobbler=head_wobbler,
+        wake_word_gate=wake_word_gate,
     )
     current_file_path = os.path.dirname(os.path.abspath(__file__))
     logger.debug(f"Current file absolute path: {current_file_path}")

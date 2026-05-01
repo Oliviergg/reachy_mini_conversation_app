@@ -268,6 +268,9 @@ class MovementManager:
         self.idle_inactivity_delay = 0.3  # seconds
         self.target_frequency = CONTROL_LOOP_FREQUENCY_HZ
         self.target_period = 1.0 / self.target_frequency
+        # In sleep mode the pose is static; slow the loop way down to save CPU.
+        self.sleep_target_frequency = 10.0
+        self.sleep_target_period = 1.0 / self.sleep_target_frequency
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -278,6 +281,8 @@ class MovementManager:
         self._antenna_blend_duration = 0.4  # seconds to blend back after listening
         self._last_listening_blend_time = self._now()
         self._breathing_active = False  # true when breathing move is running or queued
+        self._sleep_mode = False  # true when the wake-word gate is asleep: hold sleep pose, no breathing
+        self._control_paused = False  # when True, _issue_control_command is a no-op (used during SDK goto_*)
         self._listening_debounce_s = 0.15
         self._last_listening_toggle_time = self._now()
         self._last_set_target_err = 0.0
@@ -360,6 +365,13 @@ class MovementManager:
             return False
 
         return self._now() - last_activity >= self.idle_inactivity_delay
+
+    def set_sleep(self, active: bool) -> None:
+        """Enter or leave sleep mode (holds a sleep pose, suspends breathing).
+
+        Thread-safe: posted to the worker command queue.
+        """
+        self._command_queue.put(("set_sleep", bool(active)))
 
     def set_listening(self, listening: bool) -> None:
         """Enable or disable listening mode without touching shared state directly.
@@ -445,6 +457,20 @@ class MovementManager:
             self.state.update_activity()
         elif command == "mark_activity":
             self.state.update_activity()
+        elif command == "set_sleep":
+            desired = bool(payload)
+            if desired == self._sleep_mode:
+                return
+            self._sleep_mode = desired
+            # Stop fighting the SDK goto_* during the transition; the helper
+            # thread re-enables control once it's done.
+            self._control_paused = True
+            self.move_queue.clear()
+            self.state.current_move = None
+            self.state.move_start_time = None
+            self._breathing_active = False
+            target = self._do_deep_sleep if desired else self._do_deep_wake
+            threading.Thread(target=target, daemon=True).start()
         elif command == "set_listening":
             desired_state = bool(payload)
             now = self._now()
@@ -471,6 +497,45 @@ class MovementManager:
         else:
             logger.warning("Unknown command received by MovementManager: %s", command)
 
+    def _do_deep_sleep(self) -> None:
+        """Run SDK ``goto_sleep`` then disable motors. Runs in its own thread."""
+        try:
+            self.current_robot.goto_sleep()
+            self.current_robot.disable_motors()
+            logger.info("Deep sleep: motors disabled")
+        except Exception as e:
+            logger.error("Deep sleep failed: %s", e)
+        # Stay paused: with motors disabled there is nothing to drive.
+
+    def _do_deep_wake(self) -> None:
+        """Re-enable motors and bring head back to neutral. Runs in its own thread."""
+        try:
+            self.current_robot.goto_target(
+                head=self.current_robot.get_current_head_pose(),
+                duration=0.05
+            )
+            self.current_robot.disable_motors()        # workaround edge case mixed-state
+            self.current_robot.enable_motors()
+            neutral = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
+            self.current_robot.goto_target(neutral, antennas=(10.0, -10.0), duration=2)
+            logger.info("Deep wake: motors enabled, at neutral")
+        except Exception as e:
+            logger.error("Deep wake failed: %s", e)
+        finally:
+            try:
+                head = self.current_robot.get_current_head_pose()
+                _, antennas = self.current_robot.get_current_joint_positions()
+                self.state.last_primary_pose = (
+                    np.asarray(head, dtype=np.float32),
+                    (float(antennas[0]), float(antennas[1])),
+                    0.0,
+                )
+            except Exception:
+                pass
+            # Mark activity so breathing doesn't kick in instantly, then resume.
+            self._command_queue.put(("mark_activity", None))
+            self._control_paused = False
+
     def _publish_shared_state(self) -> None:
         """Expose idle-related state for external threads."""
         with self._shared_state_lock:
@@ -495,6 +560,8 @@ class MovementManager:
 
     def _manage_breathing(self, current_time: float) -> None:
         """Manage automatic breathing when idle."""
+        if self._sleep_mode:
+            return
         if (
             self.state.current_move is None
             and not self.move_queue
@@ -646,6 +713,8 @@ class MovementManager:
         self, head: NDArray[np.float32], antennas: Tuple[float, float], body_yaw: float
     ) -> None:
         """Send the fused pose to the robot with throttled error logging."""
+        if self._control_paused:
+            return
         try:
             self.current_robot.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
         except Exception as e:
@@ -684,7 +753,8 @@ class MovementManager:
         """Compute sleep time to maintain target frequency and update potential freq."""
         computation_time = self._now() - loop_start
         stats.potential_freq = 1.0 / computation_time if computation_time > 0 else float("inf")
-        sleep_time = max(0.0, self.target_period - computation_time)
+        period = self.sleep_target_period if self._sleep_mode else self.target_period
+        sleep_time = max(0.0, period - computation_time)
         return sleep_time, stats
 
     def _record_frequency_snapshot(self, stats: LoopFrequencyStats) -> None:

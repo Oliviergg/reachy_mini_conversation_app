@@ -571,11 +571,22 @@ class LocalStream:
         input_sample_rate = self._robot.media.get_input_audio_samplerate()
         logger.debug(f"Audio recording started at {input_sample_rate} Hz")
 
+        gate = getattr(self.handler.deps, "wake_word_gate", None)
+
+        # Mic frames are 320 samples / 16 kHz = 20 ms apart. Polling every 5 ms
+        # leaves headroom and avoids burning CPU on no-data busy-loops.
+        idle_poll_s = 0.005
+
         while not self._stop_event.is_set():
             audio_frame = self._robot.media.get_audio_sample()
-            if audio_frame is not None:
+            if audio_frame is None:
+                await asyncio.sleep(idle_poll_s)
+                continue
+            if gate is None or gate.should_forward(input_sample_rate, audio_frame):
                 await self.handler.receive((input_sample_rate, audio_frame))
-            await asyncio.sleep(0)  # avoid busy loop
+            else:
+                # Yield to other tasks so the event loop can breathe between frames.
+                await asyncio.sleep(0)
 
     async def play_loop(self) -> None:
         """Fetch outputs from the handler: log text and play audio frames."""

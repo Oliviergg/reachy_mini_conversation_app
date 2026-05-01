@@ -559,10 +559,14 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
                         if self.deps.head_wobbler is not None:
                             self.deps.head_wobbler.reset()
                         self.deps.movement_manager.set_listening(True)
+                        if self.deps.wake_word_gate is not None:
+                            self.deps.wake_word_gate.notify_activity()
                         logger.debug("User speech started")
 
                     if event.type == "input_audio_buffer.speech_stopped":
                         self.deps.movement_manager.set_listening(False)
+                        if self.deps.wake_word_gate is not None:
+                            self.deps.wake_word_gate.notify_activity()
                         logger.debug("User speech stopped - server will auto-commit with VAD")
 
                     if event.type == "response.output_audio.done":
@@ -779,9 +783,15 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         # sends to the stream the stuff put in the output queue by the openai event handler
         # This is called periodically by the fastrtc Stream
 
-        # Handle idle
+        # Handle idle (skip while the wake-word gate is asleep — robot must stay quiet)
+        gate = self.deps.wake_word_gate
+        gate_awake = gate.is_awake() if gate is not None else True
+        if not gate_awake:
+            # Reset the idle timer while asleep so we don't fire an idle signal the
+            # instant the gate wakes up after a long quiet period.
+            self.last_activity_time = asyncio.get_event_loop().time()
         idle_duration = asyncio.get_event_loop().time() - self.last_activity_time
-        if idle_duration > 15.0 and self.deps.movement_manager.is_idle():
+        if gate_awake and idle_duration > 15.0 and self.deps.movement_manager.is_idle():
             try:
                 await self.send_idle_signal(idle_duration)
             except Exception as e:

@@ -48,6 +48,10 @@ yolo_vision = [
 mediapipe_vision = [
   "mediapipe==0.10.14",
 ]
+wake_word = [
+  "openwakeword>=0.6.0",
+  "onnxruntime>=1.17",
+]
 all_vision = [
   "accelerate>=1.13.0",
   "torch>=2.1",

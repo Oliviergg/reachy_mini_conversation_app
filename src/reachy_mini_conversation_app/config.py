@@ -238,6 +238,18 @@ class Config:
     AUTOLOAD_EXTERNAL_TOOLS = _env_flag("AUTOLOAD_EXTERNAL_TOOLS", default=False)
     REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
+    # Wake-word gate. Empty -> disabled (always-on). Otherwise an openWakeWord
+    # model name (e.g. "hey_jarvis", "alexa", "hey_mycroft").
+    WAKE_WORD = (os.getenv("REACHY_WAKE_WORD") or "").strip()
+    WAKE_WORD_SLEEP_TIMEOUT_S = float(os.getenv("REACHY_WAKE_WORD_SLEEP_TIMEOUT_S", "30.0"))
+    WAKE_WORD_THRESHOLD = float(os.getenv("REACHY_WAKE_WORD_THRESHOLD", "0.5"))
+    # Cheap RMS pre-filter (int16 scale): chunks below this skip the ONNX
+    # inference entirely. Big CPU saver on Pi-class hardware.
+    WAKE_WORD_RMS_FLOOR = float(os.getenv("REACHY_WAKE_WORD_RMS_FLOOR", "100"))
+    # openWakeWord built-in Silero VAD threshold (0 = disabled). Off by default
+    # because it adds ONNX inference; the RMS pre-filter is cheaper.
+    WAKE_WORD_VAD_THRESHOLD = float(os.getenv("REACHY_WAKE_WORD_VAD_THRESHOLD", "0"))
+
     logger.debug(f"Custom Profile: {REACHY_MINI_CUSTOM_PROFILE}")
 
     def __init__(self) -> None:
